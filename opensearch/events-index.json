@@ -1,0 +1,68 @@
+{
+  "settings": {
+    "index": {
+      "number_of_shards": 1,
+      "number_of_replicas": 1
+    },
+    "analysis": {
+      "filter": {
+        "autocomplete_filter": {
+          "type": "edge_ngram",
+          "min_gram": 1,
+          "max_gram": 20
+        },
+        "event_synonyms": {
+          "type": "synonym_graph",
+          "synonyms": [
+            "concert, gig, show, performance",
+            "musical, theater, theatre",
+            "movie, film, cinema",
+            "festival, fest",
+            "standup, stand-up, comedy"
+          ]
+        }
+      },
+      "analyzer": {
+        "autocomplete_index": {
+          "type": "custom",
+          "tokenizer": "standard",
+          "filter": ["lowercase", "autocomplete_filter"]
+        },
+        "autocomplete_search": {
+          "type": "custom",
+          "tokenizer": "standard",
+          "filter": ["lowercase"]
+        },
+        "synonym_search": {
+          "type": "custom",
+          "tokenizer": "standard",
+          "filter": ["lowercase", "event_synonyms"]
+        }
+      }
+    }
+  },
+  "mappings": {
+    "properties": {
+      "eventId": { "type": "keyword" },
+      "name": {
+        "type": "text",
+        "analyzer": "synonym_search",
+        "fields": {
+          "autocomplete": {
+            "type": "text",
+            "analyzer": "autocomplete_index",
+            "search_analyzer": "autocomplete_search"
+          },
+          "raw": { "type": "keyword" }
+        }
+      },
+      "genre": { "type": "text", "analyzer": "synonym_search" },
+      "performerId": { "type": "keyword" },
+      "performerName": { "type": "text", "analyzer": "synonym_search" },
+      "venueId": { "type": "keyword" },
+      "date": { "type": "date", "format": "strict_date_optional_time||yyyy-MM-dd" },
+      "posterKey": { "type": "keyword", "index": false },
+      "createdAt": { "type": "date" }
+    }
+  }
+}

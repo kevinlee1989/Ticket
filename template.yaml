@@ -1,0 +1,244 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Serverless ticket-booking backend: API Gateway + Lambda + DynamoDB with
+  TTL-based optimistic seat locking, DynamoDB Streams -> OpenSearch indexing,
+  and S3 presigned uploads for event assets.
+
+Parameters:
+  OpenSearchEndpoint:
+    Type: String
+    Description: OpenSearch domain endpoint (https://...)
+  OpenSearchUsername:
+    Type: String
+    NoEcho: true
+  OpenSearchPassword:
+    Type: String
+    NoEcho: true
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 15
+    MemorySize: 256
+    Environment:
+      Variables:
+        EVENTS_TABLE: !Ref EventsTable
+        VENUES_TABLE: !Ref VenuesTable
+        PERFORMERS_TABLE: !Ref PerformersTable
+        TICKETS_TABLE: !Ref TicketsTable
+
+Resources:
+  # ---------------------------------------------------------------- DynamoDB
+  EventsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: Events
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: eventId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: eventId
+          KeyType: HASH
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+
+  VenuesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: Venues
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: venueId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: venueId
+          KeyType: HASH
+
+  PerformersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: Performers
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: performerId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: performerId
+          KeyType: HASH
+
+  TicketsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: Tickets
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: eventId
+          AttributeType: S
+        - AttributeName: ticketId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: eventId
+          KeyType: HASH
+        - AttributeName: ticketId
+          KeyType: RANGE
+
+  # ---------------------------------------------------------------------- S3
+  AssetsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      CorsConfiguration:
+        CorsRules:
+          - AllowedMethods: [PUT]
+            AllowedOrigins: ["*"]
+            AllowedHeaders: ["Content-Type"]
+            MaxAge: 3600
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # ----------------------------------------------------------------- Lambdas
+  EventsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/events.handler
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref EventsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref TicketsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref VenuesTable }
+      Events:
+        Create:
+          Type: Api
+          Properties: { Path: /events, Method: post }
+        Get:
+          Type: Api
+          Properties: { Path: /events/{eventId}, Method: get }
+        Update:
+          Type: Api
+          Properties: { Path: /events/{eventId}, Method: put }
+        Delete:
+          Type: Api
+          Properties: { Path: /events/{eventId}, Method: delete }
+
+  VenuesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/venues.handler
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref VenuesTable }
+      Events:
+        Create:
+          Type: Api
+          Properties: { Path: /venues, Method: post }
+        Get:
+          Type: Api
+          Properties: { Path: /venues/{venueId}, Method: get }
+        Update:
+          Type: Api
+          Properties: { Path: /venues/{venueId}, Method: put }
+        Delete:
+          Type: Api
+          Properties: { Path: /venues/{venueId}, Method: delete }
+
+  PerformersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/performers.handler
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref PerformersTable }
+      Events:
+        Create:
+          Type: Api
+          Properties: { Path: /performers, Method: post }
+        Get:
+          Type: Api
+          Properties: { Path: /performers/{performerId}, Method: get }
+        Update:
+          Type: Api
+          Properties: { Path: /performers/{performerId}, Method: put }
+        Delete:
+          Type: Api
+          Properties: { Path: /performers/{performerId}, Method: delete }
+
+  TicketsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/tickets.handler
+      Environment:
+        Variables:
+          HOLD_SECONDS: "600"
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref TicketsTable }
+      Events:
+        List:
+          Type: Api
+          Properties: { Path: /events/{eventId}/tickets, Method: get }
+        Hold:
+          Type: Api
+          Properties: { Path: /tickets/hold, Method: post }
+        Confirm:
+          Type: Api
+          Properties: { Path: /tickets/confirm, Method: post }
+        Release:
+          Type: Api
+          Properties: { Path: /tickets/release, Method: post }
+
+  SearchFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/search.handler
+      Environment:
+        Variables:
+          OPENSEARCH_ENDPOINT: !Ref OpenSearchEndpoint
+          OPENSEARCH_USERNAME: !Ref OpenSearchUsername
+          OPENSEARCH_PASSWORD: !Ref OpenSearchPassword
+      Events:
+        Search:
+          Type: Api
+          Properties: { Path: /search, Method: get }
+        Autocomplete:
+          Type: Api
+          Properties: { Path: /search/autocomplete, Method: get }
+
+  UploadsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/uploads.handler
+      Environment:
+        Variables:
+          ASSETS_BUCKET: !Ref AssetsBucket
+      Policies:
+        - S3WritePolicy: { BucketName: !Ref AssetsBucket }
+      Events:
+        CreateUploadUrl:
+          Type: Api
+          Properties: { Path: /uploads, Method: post }
+
+  StreamIndexerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/stream-indexer.handler
+      Environment:
+        Variables:
+          OPENSEARCH_ENDPOINT: !Ref OpenSearchEndpoint
+          OPENSEARCH_USERNAME: !Ref OpenSearchUsername
+          OPENSEARCH_PASSWORD: !Ref OpenSearchPassword
+      Events:
+        EventsStream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt EventsTable.StreamArn
+            StartingPosition: LATEST
+            BatchSize: 25
+            BisectBatchOnFunctionError: true
+            MaximumRetryAttempts: 3
+
+Outputs:
+  ApiUrl:
+    Description: Base URL of the ticket-booking API
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod"
+  AssetsBucketName:
+    Value: !Ref AssetsBucket
